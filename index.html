@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Kinetic Strings & Percussion</title>
   <style>
     :root {
@@ -13,6 +13,7 @@
       --accent-dim: #45a29e;
       --drum-color: #ff6b6b;
       --staff-line: rgba(255, 255, 255, 0.18);
+      color-scheme: dark;
     }
 
     * {
@@ -20,6 +21,12 @@
       margin: 0;
       padding: 0;
       user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      height: 100%;
     }
 
     body {
@@ -27,8 +34,7 @@
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       overflow: hidden;
-      height: 100vh;
-      width: 100vw;
+      width: 100%;
       display: flex;
       flex-direction: column;
     }
@@ -36,15 +42,21 @@
     /* Minimal Floating HUD */
     #hud {
       position: fixed;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
+      top: calc(16px + env(safe-area-inset-top, 0px));
+      left: 0;
+      right: 0;
+      margin: 0 auto;
+      width: max-content;
+      max-width: calc(100% - 24px);
       z-index: 10;
       display: flex;
-      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
       background: rgba(18, 20, 28, 0.75);
       backdrop-filter: blur(8px);
-      padding: 8px 14px;
+      -webkit-backdrop-filter: blur(8px);
+      padding: 8px 12px;
       border-radius: 999px;
       border: 1px solid rgba(255, 255, 255, 0.08);
       font-size: 13px;
@@ -59,13 +71,16 @@
       border-radius: 999px;
       cursor: pointer;
       font-size: 12px;
+      white-space: nowrap;
       transition: all 0.15s ease;
     }
 
-    button:hover {
+    button:hover,
+    button:focus-visible {
       background: var(--accent);
       color: var(--bg);
       border-color: var(--accent);
+      outline: none;
     }
 
     .hint {
@@ -74,8 +89,13 @@
       font-size: 12px;
     }
 
+    @media (max-width: 640px) {
+      .hint { display: none; }
+    }
+
     #stage {
       flex: 1;
+      min-height: 0;
       width: 100%;
       display: block;
       cursor: crosshair;
@@ -98,27 +118,44 @@
     const canvas = document.getElementById('stage');
     const ctx = canvas.getContext('2d');
 
-    let width = (canvas.width = window.innerWidth);
-    let height = (canvas.height = window.innerHeight);
+    // Layout state (CSS pixels; the backing store is scaled by devicePixelRatio)
+    let width = 0;
+    let height = 0;
+    let staffAreaHeight = 195;
+    let playAreaHeight = 0;
+    let playTop = 0; // keeps strings and drums clear of the floating HUD
 
-    // Layout constants
-    let staffAreaHeight = 190;
-    let playAreaHeight = height - staffAreaHeight;
-
-    // Web Audio API Context
+    // Web Audio API Context, created on the first user gesture
     let audioCtx = null;
+    let masterBus = null;
     function initAudio() {
       if (!audioCtx) {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // Compressor keeps fast strums and drum rolls from clipping
+        const comp = audioCtx.createDynamicsCompressor();
+        comp.threshold.setValueAtTime(-14, audioCtx.currentTime);
+        comp.knee.setValueAtTime(10, audioCtx.currentTime);
+        comp.ratio.setValueAtTime(6, audioCtx.currentTime);
+        comp.attack.setValueAtTime(0.003, audioCtx.currentTime);
+        comp.release.setValueAtTime(0.2, audioCtx.currentTime);
+        masterBus = audioCtx.createGain();
+        masterBus.gain.setValueAtTime(0.8, audioCtx.currentTime);
+        masterBus.connect(comp);
+        comp.connect(audioCtx.destination);
       }
       if (audioCtx.state === 'suspended') {
         audioCtx.resume();
       }
     }
 
+    // Orbs can fire before anyone has interacted; stay silent until audio is unlocked
+    function audioReady() {
+      return audioCtx && audioCtx.state === 'running';
+    }
+
     // --- SOUND SYNTHESIS ---
     function playGuitarSound(freq) {
-      initAudio();
+      if (!audioReady()) return;
       const now = audioCtx.currentTime;
 
       const osc1 = audioCtx.createOscillator();
@@ -142,7 +179,7 @@
       osc1.connect(filter);
       osc2.connect(filter);
       filter.connect(gain);
-      gain.connect(audioCtx.destination);
+      gain.connect(masterBus);
 
       osc1.start(now);
       osc2.start(now);
@@ -150,8 +187,16 @@
       osc2.stop(now + 1.65);
     }
 
+    function noiseBuffer(seconds) {
+      const bufferSize = Math.floor(audioCtx.sampleRate * seconds);
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+      return buffer;
+    }
+
     function playDrumSound(type) {
-      initAudio();
+      if (!audioReady()) return;
       const now = audioCtx.currentTime;
 
       if (type === 'kick') {
@@ -162,18 +207,13 @@
         gain.gain.setValueAtTime(0.6, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
         osc.connect(gain);
-        gain.connect(audioCtx.destination);
+        gain.connect(masterBus);
         osc.start(now);
         osc.stop(now + 0.4);
       } else if (type === 'snare') {
         // Noise burst
-        const bufferSize = audioCtx.sampleRate * 0.2;
-        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-
         const noise = audioCtx.createBufferSource();
-        noise.buffer = buffer;
+        noise.buffer = noiseBuffer(0.2);
         const filter = audioCtx.createBiquadFilter();
         filter.type = 'highpass';
         filter.frequency.setValueAtTime(700, now);
@@ -184,7 +224,7 @@
 
         noise.connect(filter);
         filter.connect(gain);
-        gain.connect(audioCtx.destination);
+        gain.connect(masterBus);
         noise.start(now);
 
         // Body tone
@@ -195,17 +235,12 @@
         oscGain.gain.setValueAtTime(0.25, now);
         oscGain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
         osc.connect(oscGain);
-        oscGain.connect(audioCtx.destination);
+        oscGain.connect(masterBus);
         osc.start(now);
         osc.stop(now + 0.1);
       } else if (type === 'hihat') {
-        const bufferSize = audioCtx.sampleRate * 0.08;
-        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-
         const noise = audioCtx.createBufferSource();
-        noise.buffer = buffer;
+        noise.buffer = noiseBuffer(0.08);
         const filter = audioCtx.createBiquadFilter();
         filter.type = 'highpass';
         filter.frequency.setValueAtTime(6000, now);
@@ -216,7 +251,7 @@
 
         noise.connect(filter);
         filter.connect(gain);
-        gain.connect(audioCtx.destination);
+        gain.connect(masterBus);
         noise.start(now);
       } else if (type === 'tom') {
         const osc = audioCtx.createOscillator();
@@ -226,7 +261,7 @@
         gain.gain.setValueAtTime(0.45, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
         osc.connect(gain);
-        gain.connect(audioCtx.destination);
+        gain.connect(masterBus);
         osc.start(now);
         osc.stop(now + 0.3);
       }
@@ -251,58 +286,111 @@
       { name: 'Kick',   type: 'kick',  staffStep: 0, shape: 'circle',   color: '#f78c6b', isDrum: true }
     ];
 
+    const SCROLL_SPEED = 1.6;   // px per 60fps frame
+    const NOTE_SPACING = 16;    // minimum gap between consecutive notes on the staff
+
     let sheetNotes = [];
     let strings = [];
     let drums = [];
     let orbs = [];
 
+    function playheadX() {
+      return width - 90;
+    }
+
     function addSheetNote(def) {
+      // New notes land on the playhead; if the previous note is still too close,
+      // push the earlier notes left so fast strums stay readable
+      const x = playheadX();
+      const last = sheetNotes[sheetNotes.length - 1];
+      if (last && last.x > x - NOTE_SPACING) {
+        const shift = last.x - (x - NOTE_SPACING);
+        sheetNotes.forEach(n => { n.x -= shift; });
+      }
       sheetNotes.push({
         name: def.name,
         staffStep: def.staffStep,
         color: def.color,
         isDrum: !!def.isDrum,
-        x: width - 90,
-        alpha: 1,
-        born: performance.now()
+        x
       });
-      if (sheetNotes.length > 80) sheetNotes.shift();
+      if (sheetNotes.length > 120) sheetNotes.shift();
     }
 
     // --- BUILD SCENE GEOMETRY ---
     function setupLayout() {
-      width = canvas.width = window.innerWidth;
-      height = canvas.height = window.innerHeight;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      width = rect.width;
+      height = rect.height;
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
       staffAreaHeight = 195;
       playAreaHeight = height - staffAreaHeight;
+      const hud = document.getElementById('hud').getBoundingClientRect();
+      playTop = hud.bottom + 24;
 
-      // 6 Guitar Strings on the left half
-      strings = guitarDefs.map((def, i) => {
-        const y = 100 + i * ((playAreaHeight - 170) / 5);
-        return {
+      const usable = Math.max(playAreaHeight - playTop - 30, 120);
+      const narrow = width < 700 || width < height * 0.9;
+
+      if (narrow) {
+        // Phones / portrait: strings across the top, drums in a row below
+        const stringsBottom = playTop + usable * 0.62;
+        strings = guitarDefs.map((def, i) => ({
           ...def,
-          x1: width * 0.08,
-          x2: width * 0.52,
-          y: y,
+          x1: Math.max(44, width * 0.12),
+          x2: width - Math.max(20, width * 0.06),
+          y: playTop + 10 + i * ((stringsBottom - playTop - 10) / 5),
           amp: 0,
           vel: 0
-        };
-      });
+        }));
 
-      // 4 Drum Shapes on the right half
-      const cols = 2;
-      drums = drumDefs.map((def, i) => {
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        const cx = width * 0.68 + col * (width * 0.16);
-        const cy = 140 + row * ((playAreaHeight - 240));
-        return {
+        const r = Math.min(width / 10, usable * 0.14, 46);
+        const drumY = stringsBottom + (playAreaHeight - stringsBottom) / 2;
+        drums = drumDefs.map((def, i) => ({
           ...def,
-          x: cx,
-          y: cy,
-          r: Math.min(width, height) * 0.055,
-          pulse: 0
-        };
+          x: width * (0.125 + i * 0.25),
+          y: drumY,
+          r,
+          pulse: 0,
+          lastHit: 0
+        }));
+      } else {
+        // 6 Guitar Strings on the left half
+        strings = guitarDefs.map((def, i) => ({
+          ...def,
+          x1: Math.max(44, width * 0.08),
+          x2: width * 0.52,
+          y: playTop + 10 + i * ((usable - 20) / 5),
+          amp: 0,
+          vel: 0
+        }));
+
+        // 4 Drum Shapes on the right half
+        const r = Math.min(width * 0.055, usable * 0.2);
+        drums = drumDefs.map((def, i) => {
+          const col = i % 2;
+          const row = Math.floor(i / 2);
+          return {
+            ...def,
+            x: width * 0.68 + col * (width * 0.16),
+            y: playTop + r + 10 + row * Math.max(usable - 2 * r - 20, 0),
+            r,
+            pulse: 0,
+            lastHit: 0
+          };
+        });
+      }
+
+      // Keep existing orbs inside the resized play area
+      orbs.forEach(orb => {
+        orb.x = Math.max(orb.r, Math.min(width - orb.r, orb.x));
+        orb.y = Math.max(orb.r, Math.min(playAreaHeight - orb.r, orb.y));
+        orb.px = orb.x;
+        orb.py = orb.y;
+        orb.trail = [];
       });
     }
 
@@ -313,11 +401,13 @@
     function spawnOrb(x, y) {
       const angle = Math.random() * Math.PI * 2;
       const speed = 4.2 + Math.random() * 2.5;
+      const ox = x ?? width * 0.5;
+      const oy = y ?? playAreaHeight * 0.45;
       orbs.push({
-        x: x ?? width * 0.5,
-        y: y ?? playAreaHeight * 0.45,
-        px: x ?? width * 0.5,
-        py: y ?? playAreaHeight * 0.45,
+        x: ox,
+        y: oy,
+        px: ox,
+        py: oy,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         r: 9,
@@ -331,13 +421,14 @@
 
     // --- TRIGGER HELPERS ---
     function triggerString(s, velocity = 22) {
-      s.amp = velocity;
+      s.amp = Math.max(-35, Math.min(35, velocity));
       playGuitarSound(s.freq);
       addSheetNote(s);
     }
 
     function triggerDrum(d) {
       d.pulse = 1.0;
+      d.lastHit = performance.now();
       playDrumSound(d.type);
       addSheetNote(d);
     }
@@ -345,26 +436,40 @@
     // --- INTERACTION (MOUSE / TOUCH) ---
     let pointer = { x: 0, y: 0, px: 0, py: 0, active: false };
 
-    window.addEventListener('pointerdown', (e) => {
+    function canvasPoint(e) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
       initAudio();
-      pointer.x = pointer.px = e.clientX;
-      pointer.y = pointer.py = e.clientY;
+      const p = canvasPoint(e);
+      pointer.x = pointer.px = p.x;
+      pointer.y = pointer.py = p.y;
       pointer.active = true;
+
+      // Tap directly on a string to pluck it
+      strings.forEach(s => {
+        if (p.x >= s.x1 && p.x <= s.x2 && Math.abs(p.y - s.y) <= 12) {
+          triggerString(s, 18);
+        }
+      });
 
       // Check direct click on drum shape
       drums.forEach(d => {
-        const dist = Math.hypot(pointer.x - d.x, pointer.y - d.y);
+        const dist = Math.hypot(p.x - d.x, p.y - d.y);
         if (dist <= d.r * 1.15) {
           triggerDrum(d);
         }
       });
     });
 
-    window.addEventListener('pointermove', (e) => {
+    canvas.addEventListener('pointermove', (e) => {
+      const p = canvasPoint(e);
       pointer.px = pointer.x;
       pointer.py = pointer.y;
-      pointer.x = e.clientX;
-      pointer.y = e.clientY;
+      pointer.x = p.x;
+      pointer.y = p.y;
 
       // Strum strings by moving across them
       strings.forEach(s => {
@@ -372,13 +477,14 @@
           const crossedDown = pointer.py < s.y && pointer.y >= s.y;
           const crossedUp = pointer.py > s.y && pointer.y <= s.y;
           if (crossedDown || crossedUp) {
-            const dy = Math.min(Math.max(pointer.y - pointer.py, -35), 35);
+            const dy = pointer.y - pointer.py;
             triggerString(s, dy === 0 ? 18 : dy);
           }
         }
       });
 
-      // Swipe across drum edges
+      // Swipe across drum edges (only while pressed, so a plain click doesn't hit twice)
+      if (!pointer.active) return;
       drums.forEach(d => {
         const prevDist = Math.hypot(pointer.px - d.x, pointer.py - d.y);
         const currDist = Math.hypot(pointer.x - d.x, pointer.y - d.y);
@@ -388,24 +494,25 @@
       });
     });
 
+    window.addEventListener('pointercancel', () => {
+      pointer.active = false;
+    });
+
     window.addEventListener('pointerup', () => {
       pointer.active = false;
     });
 
     // UI Buttons
-    document.getElementById('addOrbBtn').addEventListener('click', (e) => {
-      e.stopPropagation();
+    document.getElementById('addOrbBtn').addEventListener('click', () => {
       initAudio();
       spawnOrb(width * (0.25 + Math.random() * 0.5), playAreaHeight * (0.25 + Math.random() * 0.5));
     });
 
-    document.getElementById('clearOrbsBtn').addEventListener('click', (e) => {
-      e.stopPropagation();
+    document.getElementById('clearOrbsBtn').addEventListener('click', () => {
       orbs = [];
     });
 
-    document.getElementById('clearSheetBtn').addEventListener('click', (e) => {
-      e.stopPropagation();
+    document.getElementById('clearSheetBtn').addEventListener('click', () => {
       sheetNotes = [];
     });
 
@@ -423,17 +530,24 @@
     }
 
     // --- MAIN ANIMATION LOOP ---
-    function animate() {
+    let lastFrame = performance.now();
+
+    function animate(now = performance.now()) {
+      // Normalise to 60fps steps so 120Hz screens don't run double speed;
+      // clamp so a backgrounded tab doesn't jump on return
+      const dt = Math.min((now - lastFrame) / (1000 / 60), 3);
+      lastFrame = now;
+
       ctx.clearRect(0, 0, width, height);
 
       // 1. Update & Draw Guitar Strings
       strings.forEach(s => {
         // Spring harmonic decay
         const stiffness = 0.28;
-        const damping = 0.90;
+        const damping = Math.pow(0.90, dt);
         const force = -stiffness * s.amp;
-        s.vel = (s.vel + force) * damping;
-        s.amp += s.vel;
+        s.vel = (s.vel + force * dt) * damping;
+        s.amp += s.vel * dt;
 
         ctx.save();
         ctx.beginPath();
@@ -446,9 +560,11 @@
         ctx.stroke();
 
         // String end pins + note label
+        ctx.shadowBlur = 0;
         ctx.fillStyle = 'rgba(255,255,255,0.45)';
         ctx.font = '11px monospace';
-        ctx.fillText(s.name, s.x1 - 28, s.y + 4);
+        ctx.textAlign = 'right';
+        ctx.fillText(s.name, s.x1 - 10, s.y + 4);
         ctx.beginPath();
         ctx.arc(s.x1, s.y, 3, 0, Math.PI * 2);
         ctx.arc(s.x2, s.y, 3, 0, Math.PI * 2);
@@ -458,7 +574,7 @@
 
       // 2. Update & Draw Drum Shapes
       drums.forEach(d => {
-        d.pulse *= 0.88;
+        d.pulse *= Math.pow(0.88, dt);
         const currentR = d.r + d.pulse * 12;
 
         ctx.save();
@@ -481,10 +597,13 @@
         ctx.fill();
         ctx.stroke();
 
+        ctx.shadowBlur = 0;
         ctx.fillStyle = 'rgba(255,255,255,0.65)';
-        ctx.font = '11px monospace';
+        ctx.font = (d.r < 36 ? '9px' : '11px') + ' monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(d.name.toUpperCase(), d.x, d.y + 4);
+        // Triangle label sits lower, where the shape is wide enough for it
+        const labelY = d.shape === 'triangle' ? d.y + d.r * 0.3 + 4 : d.y + 4;
+        ctx.fillText(d.name.toUpperCase(), d.x, labelY);
         ctx.restore();
       });
 
@@ -492,16 +611,16 @@
       orbs.forEach(orb => {
         orb.px = orb.x;
         orb.py = orb.y;
-        orb.x += orb.vx;
-        orb.y += orb.vy;
+        orb.x += orb.vx * dt;
+        orb.y += orb.vy * dt;
 
         // Bounce off walls of play area
         if (orb.x - orb.r < 0 || orb.x + orb.r > width) {
-          orb.vx *= -1;
+          orb.vx = orb.x - orb.r < 0 ? Math.abs(orb.vx) : -Math.abs(orb.vx);
           orb.x = Math.max(orb.r, Math.min(width - orb.r, orb.x));
         }
         if (orb.y - orb.r < 0 || orb.y + orb.r > playAreaHeight) {
-          orb.vy *= -1;
+          orb.vy = orb.y - orb.r < 0 ? Math.abs(orb.vy) : -Math.abs(orb.vy);
           orb.y = Math.max(orb.r, Math.min(playAreaHeight - orb.r, orb.y));
         }
 
@@ -522,16 +641,21 @@
           const dy = orb.y - d.y;
           const dist = Math.hypot(dx, dy);
           if (dist < d.r + orb.r) {
-            // Reflect velocity vector off drum normal
-            const nx = dx / dist;
-            const ny = dy / dist;
+            // Reflect velocity vector off drum normal (pick any normal if dead centre)
+            const nx = dist > 0 ? dx / dist : 1;
+            const ny = dist > 0 ? dy / dist : 0;
             const dot = orb.vx * nx + orb.vy * ny;
-            orb.vx = orb.vx - 2 * dot * nx;
-            orb.vy = orb.vy - 2 * dot * ny;
+            if (dot < 0) {
+              orb.vx = orb.vx - 2 * dot * nx;
+              orb.vy = orb.vy - 2 * dot * ny;
+            }
             // Push orb outside boundary
             orb.x = d.x + nx * (d.r + orb.r + 2);
             orb.y = d.y + ny * (d.r + orb.r + 2);
-            triggerDrum(d);
+            // Short cooldown so an orb pinned against a wall doesn't machine-gun the drum
+            if (performance.now() - d.lastHit > 80) {
+              triggerDrum(d);
+            }
           }
         });
 
@@ -560,22 +684,25 @@
       });
 
       // 4. Draw Bottom Sheet Music Staff
-      drawSheetMusic();
+      drawSheetMusic(dt);
 
       requestAnimationFrame(animate);
     }
 
-    function drawSheetMusic() {
+    function drawSheetMusic(dt) {
       const staffTop = height - staffAreaHeight + 35;
       const lineSpacing = 12; // 12px between staff lines (6px per diatonic step)
       const stepSize = lineSpacing / 2;
       const bottomLineY = staffTop + 4 * lineSpacing; // E4 line
+      const labelY = height - 8;
+      const head = playheadX();
 
       // Background panel for sheet music
       ctx.fillStyle = 'rgba(14, 16, 23, 0.95)';
       ctx.fillRect(0, height - staffAreaHeight, width, staffAreaHeight);
 
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, height - staffAreaHeight);
       ctx.lineTo(width, height - staffAreaHeight);
@@ -583,7 +710,6 @@
 
       // 5 Staff Lines
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-      ctx.lineWidth = 1;
       for (let i = 0; i < 5; i++) {
         const y = staffTop + i * lineSpacing;
         ctx.beginPath();
@@ -595,25 +721,25 @@
       // Treble Clef Symbol
       ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
       ctx.font = '46px serif';
+      ctx.textAlign = 'left';
       ctx.fillText('𝄞', 48, bottomLineY - 4);
 
       // Playhead marker on right
       ctx.strokeStyle = 'rgba(102, 252, 241, 0.25)';
       ctx.beginPath();
-      ctx.moveTo(width - 90, staffTop - 15);
-      ctx.lineTo(width - 90, bottomLineY + 45);
+      ctx.moveTo(head, staffTop - 15);
+      ctx.lineTo(head, labelY - 14);
       ctx.stroke();
 
       // Scroll & Render Notes
       for (let i = sheetNotes.length - 1; i >= 0; i--) {
         const n = sheetNotes[i];
-        n.x -= 1.6; // Scroll left
+        n.x -= SCROLL_SPEED * dt; // Scroll left
 
         if (n.x < 95) {
           sheetNotes.splice(i, 1);
           continue;
         }
-
         const noteY = bottomLineY - n.staffStep * stepSize;
 
         ctx.save();
@@ -670,16 +796,16 @@
         }
         ctx.stroke();
 
-        // Subtle note label underneath
+        // Subtle note label along the bottom edge, clear of the ledger lines
         ctx.font = '9px monospace';
         ctx.fillStyle = 'rgba(255,255,255,0.45)';
         ctx.textAlign = 'center';
-        ctx.fillText(n.name, n.x, bottomLineY + 62);
+        ctx.fillText(n.isDrum ? n.name[0] : n.name, n.x, labelY);
         ctx.restore();
       }
     }
 
-    animate();
+    requestAnimationFrame(animate);
   </script>
 </body>
 </html>
